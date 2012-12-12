@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2010, Salvatore Sanfilippo <antirez at gmail dot com>
+ * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -240,8 +240,8 @@ struct redisCommand redisCommandTable[] = {
     {"watch",watchCommand,-2,"rs",0,noPreloadGetKeys,1,-1,1,0,0},
     {"unwatch",unwatchCommand,1,"rs",0,NULL,0,0,0,0,0},
     {"cluster",clusterCommand,-2,"ar",0,NULL,0,0,0,0,0},
-    {"restore",restoreCommand,4,"awm",0,NULL,1,1,1,0,0},
-    {"migrate",migrateCommand,6,"aw",0,NULL,0,0,0,0,0},
+    {"restore",restoreCommand,-4,"awm",0,NULL,1,1,1,0,0},
+    {"migrate",migrateCommand,-6,"aw",0,NULL,0,0,0,0,0},
     {"asking",askingCommand,1,"r",0,NULL,0,0,0,0,0},
     {"dump",dumpCommand,2,"ar",0,NULL,1,1,1,0,0},
     {"object",objectCommand,-2,"r",0,NULL,2,2,2,0,0},
@@ -393,7 +393,8 @@ int dictSdsKeyCompare(void *privdata, const void *key1,
     return memcmp(key1, key2, l1) == 0;
 }
 
-/* A case insensitive version used for the command lookup table. */
+/* A case insensitive version used for the command lookup table and other
+ * places where case insensitive non binary-safe comparison is needed. */
 int dictSdsKeyCaseCompare(void *privdata, const void *key1,
         const void *key2)
 {
@@ -508,6 +509,16 @@ dictType dbDictType = {
     dictRedisObjectDestructor   /* val destructor */
 };
 
+/* server.lua_scripts sha (as sds string) -> scripts (as robj) cache. */
+dictType shaScriptObjectDictType = {
+    dictSdsCaseHash,            /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCaseCompare,      /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    dictRedisObjectDestructor   /* val destructor */
+};
+
 /* Db->expires */
 dictType keyptrDictType = {
     dictSdsHash,               /* hash function */
@@ -553,6 +564,16 @@ dictType keylistDictType = {
 /* Cluster nodes hash table, mapping nodes addresses 1.2.3.4:6379 to
  * clusterNode structures. */
 dictType clusterNodesDictType = {
+    dictSdsHash,                /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCompare,          /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    NULL                        /* val destructor */
+};
+
+/* Migrate cache dict type. */
+dictType migrateCacheDictType = {
     dictSdsHash,                /* hash function */
     NULL,                       /* key dup */
     NULL,                       /* val dup */
@@ -972,14 +993,19 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * to detect transfer failures. */
     run_with_period(1000) replicationCron();
 
-    /* Run other sub-systems specific cron jobs */
+    /* Run the Redis Cluster cron. */
     run_with_period(1000) {
         if (server.cluster_enabled) clusterCron();
     }
 
-    /* Run the sentinel timer if we are in sentinel mode. */
+    /* Run the Sentinel timer if we are in sentinel mode. */
     run_with_period(100) {
         if (server.sentinel_mode) sentinelTimer();
+    }
+
+    /* Cleanup expired MIGRATE cached sockets. */
+    run_with_period(1000) {
+        migrateCloseTimedoutSockets();
     }
 
     server.cronloops++;
@@ -1032,7 +1058,7 @@ void createSharedObjects(void) {
     shared.pong = createObject(REDIS_STRING,sdsnew("+PONG\r\n"));
     shared.queued = createObject(REDIS_STRING,sdsnew("+QUEUED\r\n"));
     shared.wrongtypeerr = createObject(REDIS_STRING,sdsnew(
-        "-ERR Operation against a key holding the wrong kind of value\r\n"));
+        "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"));
     shared.nokeyerr = createObject(REDIS_STRING,sdsnew(
         "-ERR no such key\r\n"));
     shared.syntaxerr = createObject(REDIS_STRING,sdsnew(
@@ -1055,6 +1081,8 @@ void createSharedObjects(void) {
         "-READONLY You can't write against a read only slave.\r\n"));
     shared.oomerr = createObject(REDIS_STRING,sdsnew(
         "-OOM command not allowed when used memory > 'maxmemory'.\r\n"));
+    shared.execaborterr = createObject(REDIS_STRING,sdsnew(
+        "-EXECABORT Transaction discarded because of previous errors.\r\n"));
     shared.space = createObject(REDIS_STRING,sdsnew(" "));
     shared.colon = createObject(REDIS_STRING,sdsnew(":"));
     shared.plus = createObject(REDIS_STRING,sdsnew("+"));
@@ -1155,6 +1183,7 @@ void initServerConfig() {
     server.lua_time_limit = REDIS_LUA_TIME_LIMIT;
     server.lua_client = NULL;
     server.lua_timedout = 0;
+    server.migrate_cached_sockets = dictCreate(&migrateCacheDictType,NULL);
 
     updateLRUClock();
     resetServerSaveParams();
@@ -1581,11 +1610,13 @@ int processCommand(redisClient *c) {
      * such as wrong arity, bad command name and so forth. */
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
     if (!c->cmd) {
+        flagTransaction(c);
         addReplyErrorFormat(c,"unknown command '%s'",
             (char*)c->argv[0]->ptr);
         return REDIS_OK;
     } else if ((c->cmd->arity > 0 && c->cmd->arity != c->argc) ||
                (c->argc < -c->cmd->arity)) {
+        flagTransaction(c);
         addReplyErrorFormat(c,"wrong number of arguments for '%s' command",
             c->cmd->name);
         return REDIS_OK;
@@ -1594,6 +1625,7 @@ int processCommand(redisClient *c) {
     /* Check if the user is authenticated */
     if (server.requirepass && !c->authenticated && c->cmd->proc != authCommand)
     {
+        flagTransaction(c);
         addReplyError(c,"operation not permitted");
         return REDIS_OK;
     }
@@ -1629,6 +1661,7 @@ int processCommand(redisClient *c) {
     if (server.maxmemory) {
         int retval = freeMemoryIfNeeded();
         if ((c->cmd->flags & REDIS_CMD_DENYOOM) && retval == REDIS_ERR) {
+            flagTransaction(c);
             addReply(c, shared.oomerr);
             return REDIS_OK;
         }
@@ -1640,6 +1673,7 @@ int processCommand(redisClient *c) {
         && server.lastbgsave_status == REDIS_ERR &&
         c->cmd->flags & REDIS_CMD_WRITE)
     {
+        flagTransaction(c);
         addReply(c, shared.bgsaveerr);
         return REDIS_OK;
     }
@@ -1671,6 +1705,7 @@ int processCommand(redisClient *c) {
         server.repl_serve_stale_data == 0 &&
         !(c->cmd->flags & REDIS_CMD_STALE))
     {
+        flagTransaction(c);
         addReply(c, shared.masterdownerr);
         return REDIS_OK;
     }
@@ -1692,6 +1727,7 @@ int processCommand(redisClient *c) {
           c->argc == 2 &&
           tolower(((char*)c->argv[1]->ptr)[0]) == 'k'))
     {
+        flagTransaction(c);
         addReply(c, shared.slowscripterr);
         return REDIS_OK;
     }
@@ -1900,6 +1936,7 @@ sds genRedisInfoString(char *section) {
             "redis_version:%s\r\n"
             "redis_git_sha1:%s\r\n"
             "redis_git_dirty:%d\r\n"
+            "redis_build_id:%llx\r\n"
             "redis_mode:%s\r\n"
             "os:%s %s %s\r\n"
             "arch_bits:%d\r\n"
@@ -1914,6 +1951,7 @@ sds genRedisInfoString(char *section) {
             REDIS_VERSION,
             redisGitSHA1(),
             strtol(redisGitDirty(),NULL,10) > 0,
+            redisBuildId(),
             mode,
             name.sysname, name.release, name.machine,
             server.arch_bits,
@@ -2073,7 +2111,8 @@ sds genRedisInfoString(char *section) {
             "keyspace_misses:%lld\r\n"
             "pubsub_channels:%ld\r\n"
             "pubsub_patterns:%lu\r\n"
-            "latest_fork_usec:%lld\r\n",
+            "latest_fork_usec:%lld\r\n"
+            "migrate_cached_sockets:%ld\r\n",
             server.stat_numconnections,
             server.stat_numcommands,
             getOperationsPerSecond(),
@@ -2084,7 +2123,8 @@ sds genRedisInfoString(char *section) {
             server.stat_keyspace_misses,
             dictSize(server.pubsub_channels),
             listLength(server.pubsub_patterns),
-            server.stat_fork_time);
+            server.stat_fork_time,
+            dictSize(server.migrate_cached_sockets));
     }
 
     /* Replication */
@@ -2457,12 +2497,13 @@ void daemonize(void) {
 }
 
 void version() {
-    printf("Redis server v=%s sha=%s:%d malloc=%s bits=%d\n",
+    printf("Redis server v=%s sha=%s:%d malloc=%s bits=%d build=%llx\n",
         REDIS_VERSION,
         redisGitSHA1(),
         atoi(redisGitDirty()) > 0,
         ZMALLOC_LIB,
-        sizeof(long) == 4 ? 32 : 64);
+        sizeof(long) == 4 ? 32 : 64,
+        redisBuildId());
     exit(0);
 }
 
