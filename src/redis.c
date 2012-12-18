@@ -1203,6 +1203,7 @@ void initServerConfig() {
     server.repl_slave_ro = 1;
     server.repl_down_since = time(NULL);
     server.slave_priority = REDIS_DEFAULT_SLAVE_PRIORITY;
+    server.master_repl_offset = 0;
 
     /* Client output buffer limits */
     server.client_obuf_limits[REDIS_CLIENT_LIMIT_CLASS_NORMAL].hard_limit_bytes = 0;

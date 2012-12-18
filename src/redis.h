@@ -100,6 +100,7 @@
 #define REDIS_REPLY_CHUNK_BYTES (16*1024) /* 16k output buffer */
 #define REDIS_INLINE_MAX_SIZE   (1024*64) /* Max size of inline reads */
 #define REDIS_MBULK_BIG_ARG     (1024*32)
+#define REDIS_LONGSTR_SIZE      21          /* Bytes needed for long -> str */
 
 /* Hash table parameters */
 #define REDIS_HT_MINFILL        10      /* Minimal hash table fill 10% */
@@ -651,6 +652,7 @@ struct redisServer {
     redisClient *current_client; /* Current client, only used on crash report */
     char neterr[ANET_ERR_LEN];   /* Error buffer for anet.c */
     dict *migrate_cached_sockets;/* MIGRATE cached sockets */
+    long long master_repl_offset; /* Global replication offset */
     /* RDB / AOF loading information */
     int loading;                /* We are loading data from disk if true */
     off_t loading_total_bytes;
