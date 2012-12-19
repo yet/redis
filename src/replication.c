@@ -106,7 +106,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         }
         /* We need enough space for bulk reply encoding, newlines, and
          * the data itself. */
-        if ((objlen+REDIS_LONGSTR_SIZE+32) < buf_left) break;
+        if (buf_left < objlen+REDIS_LONGSTR_SIZE+32) break;
 
         /* Write $...CRLF */
         b[0] = '$';
@@ -122,6 +122,10 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         memcpy(b,objptr,objlen);
         b += objlen;
         buf_left -= objlen;
+        b[0] = '\r';
+        b[1] = '\n';
+        b += 2;
+        buf_left -= 2;
     }
 
     /* Create an object with the static buffer content. */
@@ -153,7 +157,7 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         /* Finally any additional argument that was not stored inside the
          * static buffer if any (from j to argc). */
         for (i = j; i < argc; i++) {
-            addReplyBulk(slave,argv[j]);
+            addReplyBulk(slave,argv[i]);
             /* TODO: feedReplicationBacklog(argv[j]); */
         }
     }
