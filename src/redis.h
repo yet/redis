@@ -93,6 +93,7 @@
 #define REDIS_REPL_PING_SLAVE_PERIOD 10
 #define REDIS_RUN_ID_SIZE 40
 #define REDIS_OPS_SEC_SAMPLES 16
+#define REDIS_DEFAULT_BACKLOG_SIZE (1024*1024)
 
 /* Protocol and I/O related defines */
 #define REDIS_MAX_QUERYBUF_LEN  (1024*1024*1024) /* 1GB max query buffer. */
@@ -648,11 +649,9 @@ struct redisServer {
     list *clients;              /* List of active clients */
     list *clients_to_close;     /* Clients to close asynchronously */
     list *slaves, *monitors;    /* List of slaves and MONITORs */
-    int slaveseldb;             /* Last SELECTed DB in replication output */
     redisClient *current_client; /* Current client, only used on crash report */
     char neterr[ANET_ERR_LEN];   /* Error buffer for anet.c */
     dict *migrate_cached_sockets;/* MIGRATE cached sockets */
-    long long master_repl_offset; /* Global replication offset */
     /* RDB / AOF loading information */
     int loading;                /* We are loading data from disk if true */
     off_t loading_total_bytes;
@@ -731,11 +730,20 @@ struct redisServer {
     int syslog_enabled;             /* Is syslog enabled? */
     char *syslog_ident;             /* Syslog ident */
     int syslog_facility;            /* Syslog facility */
-    /* Slave specific fields */
+    /* Replication (master) */
+    int slaveseldb;                 /* Last SELECTed DB in replication output */
+    long long master_repl_offset;   /* Global replication offset */
+    int repl_ping_slave_period;     /* Master pings the slave every N seconds */
+    char *repl_backlog;             /* Replication backlog for partial syncs */
+    long long repl_backlog_size;    /* Backlog circular buffer size */
+    long long repl_backlog_histlen; /* Backlog actual data length */
+    long long repl_backlog_idx;     /* Backlog circualr buffer current offset */
+    long long repl_backlog_off;     /* Replication offset of first byte in the
+                                       backlog buffer. */
+    /* Replication (slave) */
     char *masterauth;               /* AUTH with this password with master */
     char *masterhost;               /* Hostname of master */
     int masterport;                 /* Port of master */
-    int repl_ping_slave_period;     /* Master pings the slave every N seconds */
     int repl_timeout;               /* Timeout after N seconds of master idle */
     redisClient *master;     /* Client that is master for this slave */
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */

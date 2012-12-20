@@ -39,15 +39,71 @@
 
 /* ---------------------------------- MASTER -------------------------------- */
 
+void createReplicationBacklog(void) {
+    redisAssert(server.repl_backlog == NULL);
+    server.repl_backlog = zmalloc(server.repl_backlog_size);
+    server.repl_backlog_histlen = 0;
+    server.repl_backlog_idx = 0;
+    server.repl_backlog_off = 0;
+    /* When a new backlog buffer is created, we increment the replication
+     * offset by one to make sure we'll not be able to PSYNC with any
+     * previous slave. This is needed because we avoid incrementing the
+     * master_repl_offset if no backlog exists nor slaves are attached. */
+    server.master_repl_offset++;
+}
+
+void freeReplicationBacklog(void) {
+    redisAssert(server.repl_backlog != NULL);
+    zfree(server.repl_backlog);
+}
+
+/* Add data to the replication backlog. This function expects that the
+ * server.master_repl_offset was already incremented before calling it. */
+void feedReplicationBacklog(robj *o) {
+    char llstr[REDIS_LONGSTR_SIZE];
+    char *p;
+    size_t len;
+
+    if (o->encoding == REDIS_ENCODING_RAW) {
+        len = ll2string(llstr,sizeof(llstr),(long)o->ptr);
+        p = llstr;
+    } else {
+        len = sdslen(o->ptr);
+        p = o->ptr;
+    }
+
+    /* This is a circular buffer, so write as much data we can at every
+     * iteration and rewind the "idx" index if we reach the limit. */
+    while(len) {
+        size_t thislen = server.repl_backlog_size - server.repl_backlog_idx;
+        if (thislen > len) thislen = len;
+        memcpy(server.repl_backlog+server.repl_backlog_idx,p,thislen);
+        server.repl_backlog_idx += thislen;
+        if (server.repl_backlog_idx == server.repl_backlog_size)
+            server.repl_backlog_idx = 0;
+        len -= thislen;
+    }
+    /* Set the offset of the first byte we have in the backlog. */
+    server.repl_backlog_off = server.master_repl_offset -
+                              server.repl_backlog_histlen + 1;
+}
+
 #define FEEDSLAVE_BUF_SIZE (1024*64)
 void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     listNode *ln;
     listIter li;
-    int j, len;
+    int j, i, len;
     char buf[FEEDSLAVE_BUF_SIZE], *b = buf;
     char llstr[REDIS_LONGSTR_SIZE];
     int buf_left = FEEDSLAVE_BUF_SIZE;
     robj *o;
+
+    /* If there aren't slaves, and there is no backlog buffer to populate,
+     * we can return ASAP. */
+    if (server.repl_backlog == NULL && listLength(slaves) == 0) return;
+
+    /* We can't have slaves attached and no backlog. */
+    redisAssert(!(listLength(slaves) != 0 && server.repl_backlog == NULL));
 
     /* What we do here is to try to write as much data as possible in a static
      * buffer "buf" that is used to create an object that is later sent to all
@@ -132,6 +188,17 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     redisAssert(buf_left < FEEDSLAVE_BUF_SIZE);
     o = createStringObject(buf,b-buf);
 
+    /* If we have a backlog, populate it with data and increment
+     * the global replication offset. */
+    if (server.repl_backlog) {
+        server.master_repl_offset += b-buf;
+        feedReplicationBacklog(o);
+        for (i = j; i < argc; i++) {
+            server.master_repl_offset += stringObjectLen(argv[i]);
+            feedReplicationBacklog(argv[j]);
+        }
+    }
+
     /* Write data to slaves. Here we do two things:
      * 1) We write the "o" object that was created using the accumulated
      *    static buffer.
@@ -141,7 +208,6 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     listRewind(slaves,&li);
     while((ln = listNext(&li))) {
         redisClient *slave = ln->value;
-        int i;
 
         /* Don't feed slaves that are still waiting for BGSAVE to start */
         if (slave->replstate == REDIS_REPL_WAIT_BGSAVE_START) continue;
@@ -152,14 +218,11 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
 
         /* First, trasmit the object created from the static buffer. */
         addReply(slave,o);
-        /* TODO: feedReplicationBacklog(o); */
 
         /* Finally any additional argument that was not stored inside the
          * static buffer if any (from j to argc). */
-        for (i = j; i < argc; i++) {
+        for (i = j; i < argc; i++)
             addReplyBulk(slave,argv[i]);
-            /* TODO: feedReplicationBacklog(argv[j]); */
-        }
     }
     decrRefCount(o);
 }
@@ -267,6 +330,8 @@ void syncCommand(redisClient *c) {
     c->flags |= REDIS_SLAVE;
     server.slaveseldb = -1; /* Force to re-emit the SELECT command. */
     listAddNodeTail(server.slaves,c);
+    if (listLength(server.slaves) == 1 && server.repl_backlog == NULL)
+        createReplicationBacklog();
     return;
 }
 
