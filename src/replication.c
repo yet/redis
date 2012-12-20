@@ -82,7 +82,10 @@ void feedReplicationBacklog(robj *o) {
         if (server.repl_backlog_idx == server.repl_backlog_size)
             server.repl_backlog_idx = 0;
         len -= thislen;
+        server.repl_backlog_histlen += thislen;
     }
+    if (server.repl_backlog_histlen > server.repl_backlog_size)
+        server.repl_backlog_histlen = server.repl_backlog_size;
     /* Set the offset of the first byte we have in the backlog. */
     server.repl_backlog_off = server.master_repl_offset -
                               server.repl_backlog_histlen + 1;
