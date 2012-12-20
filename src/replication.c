@@ -197,6 +197,9 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
         server.master_repl_offset += b-buf;
         feedReplicationBacklog(o);
         for (i = j; i < argc; i++) {
+            /* !!! TODO BUG !!!
+             * Here we need to use the bulk reply, not the object itself.
+             * So let's add $....\r\n and the final \r\n. */
             server.master_repl_offset += stringObjectLen(argv[i]);
             feedReplicationBacklog(argv[j]);
         }

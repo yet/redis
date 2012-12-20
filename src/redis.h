@@ -394,7 +394,8 @@ typedef struct redisClient {
     long bulklen;           /* length of bulk argument in multi bulk request */
     list *reply;
     unsigned long reply_bytes; /* Tot bytes of objects in reply list */
-    int sentlen;
+    int sentlen;            /* Amount of bytes already sent in the current
+                               buffer or object being sent. */
     time_t ctime;           /* Client creation time */
     time_t lastinteraction; /* time of the last interaction, used for timeout */
     time_t obuf_soft_limit_reached_time;
@@ -404,6 +405,7 @@ typedef struct redisClient {
     int repldbfd;           /* replication DB file descriptor */
     long repldboff;         /* replication DB file offset */
     off_t repldbsize;       /* replication DB file size */
+    long long reploff;      /* replication offset if this is our master */
     int slave_listening_port; /* As configured with: SLAVECONF listening-port */
     multiState mstate;      /* MULTI/EXEC state */
     blockingState bpop;   /* blocking state */
