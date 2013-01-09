@@ -2526,7 +2526,7 @@ void redisOutOfMemoryHandler(size_t allocation_size) {
         allocation_size);
     redisPanic("OOM");
 }
-
+//[yet] start to comment
 int main(int argc, char **argv) {
     struct timeval tv;
 
